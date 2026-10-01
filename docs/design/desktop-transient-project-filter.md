@@ -243,6 +243,32 @@ Desktop app invokes, including the resident `serve` allowlist. Its absence
 preserves current behavior. It is not added to `docs/cli.md` or exposed through
 public help as a promised end-user feature.
 
+Core CLI validation and the resident `serve` allowlist both reject
+`--desktop-project-id` combined with `--scope combined`. Electron derives Local
+before building the request, but the lower-layer rejection prevents an older or
+stale renderer from accidentally requesting an unfilterable Combined payload.
+
+### Typed Desktop report query
+
+Do not append another ambiguous positional argument to every bridge method.
+Introduce one named typed options object for Desktop report calls. It carries
+the optional range, background priority, effective device scope, and quick
+project ID together:
+
+```ts
+type DesktopReportQuery = {
+  range?: DateRange
+  background?: boolean
+  deviceScope?: 'local' | 'combined'
+  projectId?: string
+}
+```
+
+The renderer computes effective Local scope before creating this object. The
+preload and main process validate it once, and every supported bridge method
+consumes the same object. Renderer-only filter revision remains part of request
+and memo identity, but is never sent to the CLI.
+
 ### Query coverage
 
 Every Desktop request that can accurately contribute to a supported report
@@ -258,6 +284,41 @@ receives the quick scope, including:
 
 Filtering happens before aggregation. A section may not post-filter a rendered
 aggregate or reuse the existing Sessions investigation filter as a shortcut.
+
+### Complete filter intersection
+
+Provider and custom-range changes must continue to intersect with a quick
+project scope on every supported surface. Existing gaps are in scope for this
+work, not exceptions to the contract:
+
+- Classic Compare gains `--from`/`--to` support and receives the selected custom
+  range instead of displaying its current range-warning fallback.
+- Yield gains `--from`/`--to` support; the bridge forwards the selected custom
+  range rather than dropping it.
+- Every supported report, including its prefetch and memo/poll dependencies,
+  receives the same period or custom range alongside the provider and project
+  scope.
+
+Pull Requests must aggregate its rows from the already provider- and
+project-filtered `scanProjects` corpus. Remove the all-provider-only omission
+for local scoped reports; a selected provider must produce its matching PR data
+or an honest empty result, never an unfiltered aggregate or an artificial empty
+state caused by the provider gate.
+
+### Scoped Optimize
+
+Optimize findings must have an explicit provenance policy. A detector can render
+under a quick project scope only when it derives its evidence from the selected
+canonical project corpus. `scanSessions` and other file scanners receive the
+selected canonical identities/paths before discovery or read only files proven
+to belong to them. Global configuration detectors (for example, user-wide MCP,
+skill, command, or tool configuration) are omitted while scoped unless they can
+prove attribution to the selected project.
+
+The Optimize result-cache identity includes `projectScopeKey`. A scoped Optimize
+result may never reuse a global result that happens to have the same aggregate
+counts. A finding that combines project evidence with global configuration is
+also omitted until the configuration evidence can be attributed safely.
 
 ### Unattributable applied actions
 
@@ -278,15 +339,30 @@ value as a project value.
 ### Durable historical identity
 
 The daily cache must preserve the same canonical project identity used by live
-reports. Its per-project day maps, including provider slices, are keyed by
-canonical ID rather than the source `session.project` label. Each record keeps
-the display label and an optional path as metadata.
+reports. Its per-project day maps, including provider slices, hold structured
+project buckets with all of the following data:
+
+- canonical ID;
+- raw source label used by the Settings matcher;
+- display label;
+- optional recorded path; and
+- provenance: `exact` or `legacy`.
+
+Exact bucket map keys are namespaced encodings of canonical IDs. Legacy bucket
+keys use a different namespace. Cache merge, migration, and provider-overlay
+code compare those bucket keys and provenance; they never merge an old
+label-keyed bucket into an exact bucket merely because the strings match.
+
+Persistent Settings matching on a retained bucket uses its preserved raw label
+and path, matching `makeProjectFilter` semantics. A quick scope then requires
+`provenance: 'exact'` and canonical-ID equality.
 
 This is a cache-schema change. Bump the daily-cache version and the status
 snapshot semantic/render identity, then rederive data where source sessions are
 available. Historical cache rows written under the old label-keyed schema may
-already have combined same-named projects. They remain usable for unscoped
-totals, but are marked legacy/unattributable and excluded from:
+already have combined same-named projects. Migrate them to the legacy namespace
+without claiming an exact identity. They remain usable for unscoped totals, but
+are marked legacy/unattributable and excluded from:
 
 - quick-project report totals;
 - quick-project history and coverage calculations; and
@@ -303,6 +379,23 @@ cache records. If retained history is legacy/unattributable, that portion is
 reported as unavailable/detail-only rather than merged into a scoped total. An
 unscoped aggregate must never supplement a project-scoped Compare Periods
 result.
+
+### Scoped Overview payload audit
+
+Every field rendered by Overview has one explicit scoped policy:
+
+| Payload/data | Policy while quick-scoped |
+| --- | --- |
+| Current totals, sessions, models, spend, and daily history | Recompute from the exact selected corpus and exact retained buckets only. |
+| Pull Requests and branches | Aggregate from the same provider- and exact-project-filtered live corpus. |
+| `periodTotals` | Omit. It is an unscoped warm-generation optimization and must not stand in for a project answer. |
+| Streak | Recompute from exact selected day buckets; show unavailable rather than read raw machine-wide cache days. |
+| `act report` / realized applied savings | Omit, as defined below. |
+| Optimize findings | Include only findings passing the Scoped Optimize provenance policy. |
+
+`hasProjectFilter` and equivalent payload gates must treat a
+`desktopProjectId` as a project filter. No global generation field is retained
+merely because the persistent Settings filter itself is empty.
 
 ## Device scope
 
@@ -324,9 +417,9 @@ permanently writes a Local preference for a persistent project filter.
 
 ## Cache, refresh, and stale-response rules
 
-Define a stable `projectScopeKey`: `all` for the unscoped state and an encoded
-canonical ID for the selected state. Add it to every identity that can hold
-report output:
+Define a collision-free `projectScopeKey`: exactly `all` for the unscoped state
+and `project:<base64url(UTF-8 canonical-id)>` for a selected project. Add it to
+every identity that can hold report output:
 
 - `overviewMemoKey` and overview headline snapshots.
 - `reportMemoKey` for section reports, including Period Compare and drill-down
@@ -369,17 +462,21 @@ for the selected project.
   pattern filtering with exact canonical-ID filtering without changing public
   cohort `--project-id` semantics.
 - `src/day-aggregator.ts`, `src/daily-cache.ts`, and status-snapshot code: key
-  per-project retained history by canonical ID, bump cache/snapshot versions,
-  and exclude legacy ambiguous rows from quick scopes.
+  per-project retained history by structured canonical buckets, preserve raw
+  Settings-match metadata and provenance, bump cache/snapshot versions, and
+  exclude legacy ambiguous rows from quick scopes.
 - `src/main.ts`, `src/serve.ts`, and period-diff/history code: accept the hidden
   internal `--desktop-project-id` on each Desktop report path, provide the
-  hidden lifetime catalog, and preserve scope in Compare Periods history and
+  hidden lifetime catalog, add Compare/Yield custom-range support, make Pull
+  Requests provider-aware, and preserve scope in Compare Periods history and
   drill-down data.
-- `app/electron/main.ts`: validate one transient ID, append it after persistent
-  project arguments, provide the visible lifetime catalog, and include it in
-  every supported bridge handler.
-- Preload and `app/renderer/lib/types.ts`: expose the typed catalog and optional
-  quick-scope argument on report methods.
+- `src/optimize.ts`: restrict or omit every detector by exact project
+  provenance, and include quick scope in its result-cache identity.
+- `app/electron/main.ts`: validate one transient ID, build a typed
+  `DesktopReportQuery`, append it after persistent project arguments, provide
+  the visible lifetime catalog, and include it in every supported bridge handler.
+- Preload and `app/renderer/lib/types.ts`: expose the typed catalog and named
+  `DesktopReportQuery` rather than adding positional scope parameters.
 - `app/renderer/App.tsx`: own session-only scope, derive effective device scope,
   invalidate/revalidate the catalog after Settings changes, and thread the scope
   into all report components and memo keys.
@@ -405,13 +502,21 @@ Automated coverage must establish all of the following:
   not acquire transient filtering.
 - The hidden CLI and resident `serve` paths reject malformed IDs safely, are
   absent from public help, and retain existing behavior when no ID is supplied.
+- Both CLI and `serve` reject `--desktop-project-id` with Combined scope, even
+  when a stale caller bypasses the Desktop effective-scope calculation.
+- Bridge calls use the named `DesktopReportQuery` contract so range, priority,
+  device scope, and project ID cannot shift into one another positionally.
 - The lifetime picker catalog unites live projects and safely attributable
   retained identities, while legacy ambiguous and pathless duplicate data is
   never presented as separately selectable.
 - Daily-cache project maps and status snapshot identities use canonical IDs;
-  legacy label-keyed entries cannot contribute to a quick-project total.
+  exact buckets retain raw Settings-match label/path metadata and provenance;
+  legacy label-keyed entries cannot contribute to a quick-project total or
+  merge into an exact bucket.
 - Overview, report, prefetch, optimize, and Compare Periods memo keys differ
   across `All projects` and each canonical ID.
+- Project-scope keys are collision-free for the unscoped sentinel and any valid
+  canonical ID.
 - A late response for one scope cannot replace the data for another scope.
 - A persistent Settings-filter revision invalidates its catalog and reports, and
   a response from the previous revision cannot render afterward.
@@ -423,6 +528,14 @@ Automated coverage must establish all of the following:
   project with no current-period data remains selected and shows an empty state.
 - Scoped Overview and Optimize do not render global applied-action savings,
   headers, or applied-fix rows.
+- Scoped Overview omits `periodTotals` and computes streak only from exact
+  selected buckets, reporting unavailable where retained history is unsafe.
+- Scoped Optimize omits unprovable global configuration findings, scopes its
+  file scans and result cache, and returns only selected-project findings.
+- Classic Compare and Yield honor the selected custom range; all supported
+  reports intersect provider, period/range, and project scope.
+- Pull Requests return a provider-scoped, exact-project aggregation rather than
+  relying on the current all-provider-only payload path.
 - The picker supports search, duplicate-name path disambiguation, keyboard
   selection, Escape, accessible naming, loading, empty, and error states.
 - Compare Periods scopes both ranges, coverage/history, and its session
@@ -443,14 +556,19 @@ contract tests.
 | The picker permits `All projects` or exactly one canonical project. | This satisfies the user story and avoids accidental multi-project, subtree, or substring semantics. |
 | Canonical identity comes from normalized absolute path when available, otherwise the source project label. | It matches existing Spend and cohort identity behavior and distinguishes duplicate names when source paths are known. |
 | Persistent Settings filtering is the hard outer boundary. | Users must never see a project Settings has hidden. Exact selection is an intersection, not another include pattern. |
+| Desktop bridge report calls use one named query object. | Range, background priority, device scope, and project identity remain unambiguous as the bridge evolves. |
 | Quick scope is app-session state outside `NavState`. | It stays active through navigation and Back/Forward, while restart reliably resets it. |
 | The selector uses a visible, lifetime project catalog. | A project remains selectable even if the current period/provider has no data; hidden projects never appear. |
 | The lifetime catalog merges live projects with safely attributable retained identities; pathless same-label records are one entry. | The picker remains useful for retained history without inventing a distinction the source data cannot prove. |
 | Plans, Plugins, Settings, and exports remain unscoped. | They are not report surfaces covered by the issue, and transient Desktop scope must not alter persistent/export behavior. |
 | A selected project forces effective Local device scope without changing the saved device preference. | Combined-device payloads cannot be reliably filtered by local canonical identity. |
-| Daily-cache project buckets use canonical IDs and receive a version bump. | Label-keyed retained history can merge duplicate project names before filtering; legacy ambiguous data must not leak into an exact scope. |
+| Daily-cache project buckets retain canonical ID, raw filter label, display data, path, and provenance, and receive a version bump. | Settings matching needs the raw label/path, while namespaced `exact` and `legacy` buckets prevent ambiguous retained data from merging into an exact scope. |
 | Global applied-action data is hidden while scoped. | Current action journals lack exact project attribution, so showing them would mislabel global savings as one project's data. |
+| Optimize reports only project-proven findings while scoped. | Global configuration scans and their cached results cannot be represented as one project's data without provenance. |
+| Classic Compare, Yield, and Pull Requests receive missing range/provider propagation. | The issue requires every supported report to show the intersection of project, provider, and custom-date filters. |
+| Scoped Overview fields follow the explicit payload audit. | Generation-only totals and unsafe global history must be omitted or recomputed, never relabeled as one project's data. |
 | Every cache, snapshot, refresh, prefetch, and stale-response identity includes project scope. | This prevents data for another project or `All projects` from displaying under the wrong scope. |
+| `projectScopeKey` uses a disjoint `all` or encoded `project:` representation. | A canonical project literally named `all` cannot collide with the unscoped cache identity. |
 | A persistent Settings-filter change starts a new report-filter generation. | Changing visibility policy must invalidate cached and in-flight data from the old population. |
 | Compare Periods filters A, B, history/coverage, and drill-downs with the same ID. | Report totals must derive from one consistent filtered corpus. |
 | A Settings change that hides the active project clears the quick scope; an empty result does not. | The former protects visibility policy, while the latter is a valid period/provider result. |
