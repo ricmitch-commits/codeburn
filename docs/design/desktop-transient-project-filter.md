@@ -396,8 +396,14 @@ field unavailable rather than reading an aggregate or legacy fallback.
 
 When fresh and retained data cover the same day/provider, merging is performed
 per bucket key and provenance. Fresh exact data reconciles only its same exact
-bucket. Legacy buckets remain separate, are retained for `All projects`, and
-never top up, replace, or deduplicate an exact scoped bucket.
+bucket. Raw legacy buckets remain separate for provenance, but unscoped
+day/provider totals choose one owner using the existing fresh-vs-baseline
+reconciliation rule. A fresh exact rederivation that covers a legacy bucket's
+same day/provider replaces that legacy contribution in `All projects` totals;
+the two overlapping streams are never summed. Legacy data remains the owner
+only where fresh coverage is absent. Scoped projections still sum exact buckets
+only, so legacy data can never top up, replace, or deduplicate an exact scoped
+bucket.
 
 This is a cache-schema change. Bump the daily-cache version and the status
 snapshot semantic/render identity, then rederive data where source sessions are
@@ -564,6 +570,8 @@ Automated coverage must establish all of the following:
   report unavailable fields rather than using global or legacy aggregates.
 - Same-day/provider cache reconciliation stays per exact or legacy bucket and
   never folds legacy values into an exact scoped result.
+- When fresh exact and legacy retained buckets overlap, unscoped totals select
+  one fresh-or-baseline owner and never double-count the day/provider.
 - Overview, report, prefetch, optimize, and Compare Periods memo keys differ
   across `All projects` and each canonical ID.
 - Project-scope keys are collision-free for the unscoped sentinel and any valid
@@ -618,6 +626,7 @@ contract tests.
 | Plans, Plugins, Settings, and exports remain unscoped. | They are not report surfaces covered by the issue, and transient Desktop scope must not alter persistent/export behavior. |
 | A selected project forces effective Local device scope without changing the saved device preference. | Combined-device payloads cannot be reliably filtered by local canonical identity. |
 | Daily-cache project buckets retain canonical ID, raw filter label, display data, path, provenance, and full scoped day metrics, and receive a version bump. | Settings matching needs the raw label/path, while namespaced `exact` and `legacy` buckets prevent ambiguous retained data from merging into an exact scope or falling back to global metrics. |
+| Unscoped aggregate reconciliation chooses one owner for overlapping exact and legacy day/provider data. | Migration retains provenance without double-counting history when a fresh rederivation overlaps carried legacy data. |
 | Global applied-action data is hidden while scoped. | Current action journals lack exact project attribution, so showing them would mislabel global savings as one project's data. |
 | Optimize reports only project-proven findings while scoped. | Global configuration scans and their cached results cannot be represented as one project's data without provenance. |
 | Classic Compare, Yield, and Pull Requests receive missing range/provider propagation. | The issue requires every supported report to show the intersection of project, provider, and custom-date filters. |
